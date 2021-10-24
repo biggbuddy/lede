@@ -6,6 +6,7 @@ src-git helloworld https://github.com/fw876/helloworld
 src-git dockerman https://github.com/lisaac/luci-app-dockerman
 src-git adguardhome https://github.com/AdguardTeam/AdGuardHome
 src-git openClash https://github.com/vernesong/OpenClash
+#src-git beardropper https://github.com/NateLol/luci-app-beardropper.git
 #src-git vssr https://github.com/jerrykuku/luci-app-vssr
 #src-git video https://github.com/openwrt/video.git
 #src-git targets https://github.com/openwrt/targets.git
