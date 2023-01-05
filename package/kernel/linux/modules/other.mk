@@ -40,6 +40,8 @@ define KernelPackage/bluetooth
 	CONFIG_BT_BNEP \
 	CONFIG_BT_HCIBTUSB \
 	CONFIG_BT_HCIBTUSB_BCM=n \
+	CONFIG_BT_HCIBTUSB_MTK=y \
+	CONFIG_BT_HCIBTUSB_RTL=n \
 	CONFIG_BT_HCIUART \
 	CONFIG_BT_HCIUART_BCM=n \
 	CONFIG_BT_HCIUART_INTEL=n \
@@ -374,23 +376,6 @@ define KernelPackage/mmc/description
 endef
 
 $(eval $(call KernelPackage,mmc))
-
-
-define KernelPackage/mvsdio
-  SUBMENU:=$(OTHER_MENU)
-  TITLE:=Marvell MMC/SD/SDIO host driver
-  DEPENDS:=+kmod-mmc @TARGET_kirkwood
-  KCONFIG:= CONFIG_MMC_MVSDIO
-  FILES:= \
-	$(LINUX_DIR)/drivers/mmc/host/mvsdio.ko
-  AUTOLOAD:=$(call AutoProbe,mvsdio,1)
-endef
-
-define KernelPackage/mvsdio/description
- Kernel support for the Marvell SDIO host driver.
-endef
-
-$(eval $(call KernelPackage,mvsdio))
 
 
 define KernelPackage/sdhci
@@ -898,7 +883,6 @@ $(eval $(call KernelPackage,ikconfig))
 define KernelPackage/zram
   SUBMENU:=$(OTHER_MENU)
   TITLE:=ZRAM
-  DEPENDS:=+kmod-lib-lzo
   KCONFIG:= \
 	CONFIG_ZSMALLOC \
 	CONFIG_ZRAM \
@@ -915,8 +899,35 @@ define KernelPackage/zram/description
  Compressed RAM block device support
 endef
 
-$(eval $(call KernelPackage,zram))
+define KernelPackage/zram/config
+  choice
+    prompt "ZRAM Default compressor"
+    default ZRAM_DEF_COMP_LZORLE
 
+  config ZRAM_DEF_COMP_LZORLE
+            bool "lzo-rle"
+            select PACKAGE_kmod-lib-lzo
+
+  config ZRAM_DEF_COMP_LZO
+            bool "lzo"
+            select PACKAGE_kmod-lib-lzo
+
+  config ZRAM_DEF_COMP_LZ4
+            bool "lz4"
+            select PACKAGE_kmod-lib-lz4
+
+  config ZRAM_DEF_COMP_LZ4HC
+            bool "lz4-hc"
+            select PACKAGE_kmod-lib-lz4hc
+
+  config ZRAM_DEF_COMP_ZSTD
+            bool "zstd"
+            select PACKAGE_kmod-lib-zstd
+
+  endchoice
+endef
+
+$(eval $(call KernelPackage,zram))
 
 define KernelPackage/pps
   SUBMENU:=$(OTHER_MENU)
@@ -992,7 +1003,7 @@ $(eval $(call KernelPackage,ptp))
 define KernelPackage/ptp-qoriq
   SUBMENU:=$(OTHER_MENU)
   TITLE:=Freescale QorIQ PTP support
-  DEPENDS:=@TARGET_mpc85xx +kmod-ptp
+  DEPENDS:=@(TARGET_mpc85xx||TARGET_qoriq) +kmod-ptp
   KCONFIG:=CONFIG_PTP_1588_CLOCK_QORIQ
   FILES:=$(LINUX_DIR)/drivers/ptp/ptp-qoriq.ko
   AUTOLOAD:=$(call AutoProbe,ptp-qoriq)
@@ -1129,7 +1140,8 @@ $(eval $(call KernelPackage,keys-trusted))
 define KernelPackage/tpm
   SUBMENU:=$(OTHER_MENU)
   TITLE:=TPM Hardware Support
-  DEPENDS:= +kmod-random-core
+  DEPENDS:= +kmod-random-core +(LINUX_5_15||LINUX_6_1):kmod-asn1-decoder \
+	  +(LINUX_5_15||LINUX_6_1):kmod-asn1-encoder +(LINUX_5_15||LINUX_6_1):kmod-oid-registry
   KCONFIG:= CONFIG_TCG_TPM
   FILES:= $(LINUX_DIR)/drivers/char/tpm/tpm.ko
   AUTOLOAD:=$(call AutoLoad,10,tpm,1)
@@ -1256,3 +1268,53 @@ define KernelPackage/f71808e-wdt/description
 endef
 
 $(eval $(call KernelPackage,f71808e-wdt))
+
+
+define KernelPackage/qcom-qmi-helpers
+  SUBMENU:=$(OTHER_MENU)
+  TITLE:=Qualcomm QMI Helpers
+  KCONFIG:=CONFIG_QCOM_QMI_HELPERS
+  FILES:=$(LINUX_DIR)/drivers/soc/qcom/qmi_helpers.ko
+  AUTOLOAD:=$(call AutoProbe,qmi_helpers)
+endef
+
+define KernelPackage/qcom-qmi-helpers/description
+  Qualcomm QMI Helpers
+endef
+
+$(eval $(call KernelPackage,qcom-qmi-helpers))
+
+define KernelPackage/mhi-bus
+  SUBMENU:=$(OTHER_MENU)
+  TITLE:=MHI bus
+  DEPENDS:=@(LINUX_5_15||LINUX_6_1)
+  KCONFIG:=CONFIG_MHI_BUS \
+           CONFIG_MHI_BUS_DEBUG=y
+  FILES:= \
+	$(LINUX_DIR)/drivers/bus/mhi/core/mhi.ko@lt5.18 \
+	$(LINUX_DIR)/drivers/bus/mhi/host/mhi.ko@ge5.18
+  AUTOLOAD:=$(call AutoProbe,mhi)
+endef
+
+define KernelPackage/mhi-bus/description
+  Kernel module for the Qualcomm MHI bus.
+endef
+
+$(eval $(call KernelPackage,mhi-bus))
+
+define KernelPackage/mhi-pci-generic
+  SUBMENU:=$(OTHER_MENU)
+  TITLE:=MHI PCI controller driver
+  DEPENDS:=@(LINUX_5_15||LINUX_6_1) +kmod-mhi-bus
+  KCONFIG:=CONFIG_MHI_BUS_PCI_GENERIC
+  FILES:= \
+	$(LINUX_DIR)/drivers/bus/mhi/mhi_pci_generic.ko@lt5.18 \
+	$(LINUX_DIR)/drivers/bus/mhi/host/mhi_pci_generic.ko@ge5.18
+  AUTOLOAD:=$(call AutoProbe,mhi_pci_generic)
+endef
+
+define KernelPackage/mhi-pci-generic/description
+  Kernel module for the MHI PCI controller driver.
+endef
+
+$(eval $(call KernelPackage,mhi-pci-generic))

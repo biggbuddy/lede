@@ -26,6 +26,70 @@ define Build/gemtek-trailer
 	printf "%s%08X" ".GEMTEK." "$$(cksum $@ | cut -d ' ' -f1)" >> $@
 endef
 
+define Build/hatlab-gateboard-combined
+  rm -fR $@.bootfs.img
+
+	mkfs.fat $@.bootfs.img -C 16384
+	mcopy -i $@.bootfs.img $(IMAGE_KERNEL) ::vmlinux.itb
+
+	PADDING="1" SIGNATURE="$(IMG_PART_SIGNATURE)" \
+	GUID="$(IMG_PART_DISKGUID)" $(SCRIPT_DIR)/gen_image_generic.sh \
+	$@ \
+	$(CONFIG_TARGET_KERNEL_PARTSIZE) $@.bootfs.img \
+	$(CONFIG_TARGET_ROOTFS_PARTSIZE) $(IMAGE_ROOTFS) \
+	256
+endef
+
+define Build/hatlab-gateboard-kernel
+	rm -fR $@.initrd
+	rm -fR $@.initrd.cpio
+
+	mkdir -p $@.initrd/{bin,dev,proc,sys,lib,etc}
+	mkdir -p $@.initrd/lib/modules/$(LINUX_VERSION)
+
+	$(CP) $(STAGING_DIR)/rdloader/bin/* $@.initrd/bin/
+  $(CP) $(STAGING_DIR)/rdloader/lib/* $@.initrd/lib/
+  $(CP) $(STAGING_DIR)/rdloader/etc/* $@.initrd/etc/
+
+  $(RSTRIP) $@.initrd/bin/
+  $(RSTRIP) $@.initrd/lib/
+
+  chmod +x $@.initrd/bin/*
+  ln -s ./bin/rdloader $@.initrd/init
+
+	( \
+		KMODS=(usb-common nls_base usbcore xhci-hcd xhci-mtk jbd2 mbcache ext4 scsi_mod usb-storage sd_mod mmc_core mmc_block mtk_sd crc32c_generic); \
+		for kmod in "$${KMODS[@]}"; do \
+			$(CP) \
+				$(TARGET_DIR)/lib/modules/$(LINUX_VERSION)/$$kmod.ko \
+				$@.initrd/lib/modules/$(LINUX_VERSION)/; \
+			echo /lib/modules/$(LINUX_VERSION)/$$kmod.ko \
+				>> $@.initrd/etc/rdloader_list; \
+		done; \
+	)
+
+	( \
+		if [ -f $(STAGING_DIR_HOST)/bin/cpio ]; then \
+			CPIO=$(STAGING_DIR_HOST)/bin/cpio; \
+		else \
+			CPIO="cpio"; \
+		fi; \
+		cd $@.initrd; \
+		find . | cpio -o -H newc -R 0:0 > $@.initrd.cpio; \
+	)
+
+	$(TOPDIR)/scripts/mkits.sh \
+		-D $(DEVICE_NAME) -o $@.its -k $@ \
+		-C gzip -d $(KDIR)/image-$(DEVICE_DTS).dtb \
+		-i $@.initrd.cpio \
+		-a $(KERNEL_LOADADDR) -e $(KERNEL_LOADADDR) \
+		-c config-1 -A $(LINUX_KARCH) -v $(LINUX_VERSION)
+
+	PATH=$(LINUX_DIR)/scripts/dtc:$(PATH) mkimage -f $@.its $@.new
+
+	@mv $@.new $@
+endef
+
 define Build/iodata-factory
 	$(eval fw_size=$(word 1,$(1)))
 	$(eval fw_type=$(word 2,$(1)))
@@ -58,6 +122,31 @@ define Build/iodata-mstc-header
 			dd of=$@ bs=4 count=1 seek=1 conv=notrunc 2>/dev/null; \
 	)
 endef
+
+define Build/sercomm-tag-factory
+	$(eval magic_const=$(word 1,$(1)))
+	dd if=/dev/zero count=$$((0x200)) bs=1 of=$@.head 2>/dev/null
+	dd if=/dev/zero count=$$((0x70)) bs=1 2>/dev/null | tr '\000' '0' | \
+		dd of=$@.head conv=notrunc 2>/dev/null
+	printf $(SERCOMM_HWVER) | dd of=$@.head bs=1 conv=notrunc 2>/dev/null
+	printf $(SERCOMM_HWID) | dd of=$@.head bs=1 seek=$$((0x8)) conv=notrunc 2>/dev/null
+	printf $(SERCOMM_SWVER) | dd of=$@.head bs=1 seek=$$((0x64)) conv=notrunc \
+		2>/dev/null
+	dd if=$(IMAGE_KERNEL) skip=$$((0x100)) iflag=skip_bytes 2>/dev/null of=$@.clrkrn
+	dd if=$(IMAGE_KERNEL) count=$$((0x100)) iflag=count_bytes 2>/dev/null of=$@.hdrkrn0
+	dd if=/dev/zero count=$$((0x100)) iflag=count_bytes 2>/dev/null of=$@.hdrkrn1
+	wc -c < $@.clrkrn | tr -d '\n' | dd of=$@.head bs=1 seek=$$((0x70)) \
+		conv=notrunc 2>/dev/null
+	stat -c%s $@ | tr -d '\n' | dd of=$@.head bs=1 seek=$$((0x80)) \
+		conv=notrunc 2>/dev/null
+	printf $(magic_const) | dd of=$@.head bs=1 seek=$$((0x90)) conv=notrunc 2>/dev/null
+	cat $@.clrkrn $@ | md5sum | awk '{print $$1;}' | tr -d '\n' | dd of=$@.head bs=1 \
+	seek=$$((0x1e0)) conv=notrunc 2>/dev/null
+	cat $@.head $@.hdrkrn0 $@.hdrkrn1 $@.clrkrn $@ > $@.new
+	mv $@.new $@
+	rm $@.head $@.clrkrn
+endef
+
 
 define Build/ubnt-erx-factory-image
 	if [ -e $(KDIR)/tmp/$(KERNEL_INITRAMFS_IMAGE) -a "$$(stat -c%s $@)" -lt "$(KERNEL_SIZE)" ]; then \
@@ -226,6 +315,35 @@ define Device/asus_rt-n56u-b1
 endef
 TARGET_DEVICES += asus_rt-n56u-b1
 
+define Device/beeline_smartbox-turbo-plus
+  $(Device/dsa-migration)
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  UBINIZE_OPTS := -E 5
+  KERNEL_SIZE := 6144k
+  IMAGE_SIZE := 32768k
+  KERNEL_LOADADDR := 0x81001000
+  LZMA_TEXT_START := 0x82800000
+  SERCOMM_KERNEL_OFFSET := 0x400100
+  SERCOMM_ROOTFS_OFFSET := 0x1000000
+  KERNEL := kernel-bin | append-dtb | lzma | loader-kernel | \
+  lzma | uImage lzma | sercomm-kernel
+  KERNEL_INITRAMFS := kernel-bin | append-dtb | lzma | loader-kernel | \
+  lzma | uImage lzma
+  LOADER_TYPE := bin
+  IMAGES += factory.img
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  SERCOMM_HWID := 435152
+  SERCOMM_HWVER := 0001
+  SERCOMM_SWVER := 9999
+  IMAGE/factory.img := append-ubi | sercomm-tag-factory
+  DEVICE_VENDOR := Beeline
+  DEVICE_MODEL := SmartBox TURBO+
+  DEVICE_PACKAGES := kmod-mt7603e kmod-mt7615d luci-app-mtwifi \
+	-wpad-openssl kmod-usb3 uboot-envtools
+endef
+TARGET_DEVICES += beeline_smartbox-turbo-plus
+
 define Device/buffalo_wsr-1166dhp
   $(Device/dsa-migration)
   $(Device/uimage-lzma-loader)
@@ -260,6 +378,23 @@ define Device/buffalo_wsr-600dhp
   SUPPORTED_DEVICES += wsr-600
 endef
 TARGET_DEVICES += buffalo_wsr-600dhp
+
+define Device/c-life_xg1
+  $(Device/dsa-migration)
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  UBINIZE_OPTS := -E 5
+  KERNEL_SIZE := 4096k
+  IMAGE_SIZE := 91136k
+  IMAGES += factory.bin
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  IMAGE/factory.bin := append-kernel | pad-to $$(KERNEL_SIZE) | append-ubi | \
+	check-size
+  DEVICE_VENDOR := C-Life
+  DEVICE_MODEL := XG1
+  DEVICE_PACKAGES := kmod-mt7915e uboot-envtools kmod-usb3
+endef
+TARGET_DEVICES += c-life_xg1
 
 define Device/cudy_wr1300
   $(Device/dsa-migration)
@@ -602,6 +737,7 @@ TARGET_DEVICES += glinet_gl-mt1300
 
 define Device/gnubee_gb-pc1
   $(Device/dsa-migration)
+  $(Device/uimage-lzma-loader)
   DEVICE_VENDOR := GnuBee
   DEVICE_MODEL := Personal Cloud One
   DEVICE_PACKAGES := kmod-ata-ahci kmod-usb3 kmod-sdhci-mt7620 -wpad-openssl
@@ -611,12 +747,43 @@ TARGET_DEVICES += gnubee_gb-pc1
 
 define Device/gnubee_gb-pc2
   $(Device/dsa-migration)
+  $(Device/uimage-lzma-loader)
   DEVICE_VENDOR := GnuBee
   DEVICE_MODEL := Personal Cloud Two
   DEVICE_PACKAGES := kmod-ata-ahci kmod-usb3 kmod-sdhci-mt7620 -wpad-openssl
   IMAGE_SIZE := 32448k
 endef
 TARGET_DEVICES += gnubee_gb-pc2
+
+define Device/hatlab_gateboard-one
+  $(Device/dsa-migration)
+  DEVICE_VENDOR := HATLab
+  DEVICE_MODEL := GateBoard-One
+  DEVICE_PACKAGES := kmod-fs-ext4 kmod-gpio-pcf857x kmod-hwmon-gpiofan \
+	kmod-hwmon-lm75 kmod-i2c-gpio kmod-rtc-pcf8563 kmod-sdhci-mt7620 \
+	kmod-sfp kmod-thermal kmod-usb3 kmod-usb-ledtrig-usbport rdloader
+  KERNEL := kernel-bin | gzip | hatlab-gateboard-kernel
+  IMAGE/kernel.itb := append-kernel
+  IMAGE/rootfs.img := append-rootfs | pad-to $(ROOTFS_PARTSIZE)
+  IMAGE/rootfs.img.gz := append-rootfs | pad-to $(ROOTFS_PARTSIZE) | gzip
+  IMAGE/combined.img := hatlab-gateboard-combined | append-metadata
+  IMAGE/combined.img.gz := hatlab-gateboard-combined | gzip | append-metadata
+  IMAGES := kernel.itb
+  ifeq ($(CONFIG_TARGET_IMAGES_GZIP),y)
+    IMAGES += rootfs.img.gz combined.img.gz
+  else
+    IMAGES += rootfs.img combined.img
+  endif
+endef
+TARGET_DEVICES += hatlab_gateboard-one
+
+define Device/hilink_hlk-7621a
+  IMAGE_SIZE := 32448k
+  DEVICE_VENDOR := HiLink
+  DEVICE_MODEL := HLK-7621A
+  DEVICE_PACKAGES := kmod-usb3
+endef
+TARGET_DEVICES += hilink_hlk-7621a
 
 define Device/hiwifi_hc5962
   $(Device/dsa-migration)
@@ -802,6 +969,16 @@ define Device/jcg_y2
 endef
 TARGET_DEVICES += jcg_y2
 
+define Device/jdcloud_re-sp-01b
+  $(Device/dsa-migration)
+  IMAGE_SIZE := 27328k
+  DEVICE_VENDOR := JDCloud
+  DEVICE_MODEL := RE-SP-01B
+  DEVICE_PACKAGES := kmod-fs-ext4 kmod-mt7603 kmod-mt7615e \
+	kmod-mt7615-firmware kmod-sdhci-mt7620 kmod-usb3
+endef
+TARGET_DEVICES += jdcloud_re-sp-01b
+
 define Device/lenovo_newifi-d1
   $(Device/dsa-migration)
   $(Device/uimage-lzma-loader)
@@ -893,6 +1070,7 @@ TARGET_DEVICES += linksys_ea8100-v2
 
 define Device/linksys_re6500
   $(Device/dsa-migration)
+  $(Device/uimage-lzma-loader)
   IMAGE_SIZE := 7872k
   DEVICE_VENDOR := Linksys
   DEVICE_MODEL := RE6500
@@ -1161,6 +1339,16 @@ define Device/netis_wf2881
 endef
 TARGET_DEVICES += netis_wf2881
 
+define Device/oraybox_x3a
+  $(Device/dsa-migration)
+  $(Device/uimage-lzma-loader)
+  IMAGE_SIZE := 15360k
+  DEVICE_VENDOR := OrayBox
+  DEVICE_MODEL := X3A
+  DEVICE_PACKAGES := kmod-mt7615e kmod-mt7615-firmware
+endef
+TARGET_DEVICES += oraybox_x3a
+
 define Device/phicomm_k2p
   IMAGE_SIZE := 15744k
   DEVICE_VENDOR := Phicomm
@@ -1198,6 +1386,16 @@ define Device/raisecom_msg1500-x-00
 	kmod-usb-ledtrig-usbport uboot-envtools
 endef
 TARGET_DEVICES += raisecom_msg1500-x-00
+
+define Device/raisecom_msg1500-z-00
+  $(Device/dsa-migration)
+  IMAGE_SIZE := 16064k
+  DEVICE_VENDOR := RAISECOM
+  DEVICE_MODEL := MSG1500
+  DEVICE_VARIANT := Z.00
+  DEVICE_PACKAGES := kmod-mt7603 kmod-mt76x2 kmod-usb3
+endef
+TARGET_DEVICES += raisecom_msg1500-z-00
 
 define Device/samknows_whitebox-v8
   $(Device/dsa-migration)
@@ -1654,6 +1852,8 @@ define Device/youku_yk-l2
   DEVICE_MODEL := YK-L2
   DEVICE_PACKAGES := kmod-mt7603 kmod-mt76x2 kmod-usb3 \
 	kmod-usb-ledtrig-usbport
+  UIMAGE_MAGIC := 0x12291000
+  UIMAGE_NAME := 400000000000000000003000
 endef
 TARGET_DEVICES += youku_yk-l2
 
